@@ -81,7 +81,8 @@ jobs:
           [ -n "$refs" ] || { echo "::error::no image found (parse error?)"; exit 1; }
           failed=0
           for ref in $refs; do
-            if docker buildx imagetools inspect "$ref" | grep -qE 'Platform:[[:space:]]+linux/arm64$'; then
+            # Docker Hub's official images say linux/arm64/v8, others linux/arm64.
+            if docker buildx imagetools inspect "$ref" | grep -qE 'Platform:[[:space:]]+linux/arm64(/v8)?$'; then
               echo "$ref: linux/arm64 ok"
             else
               echo "::error::$ref is missing or has no linux/arm64 image"; failed=1

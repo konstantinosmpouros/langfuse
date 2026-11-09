@@ -10,6 +10,18 @@ updates:
     cooldown:
       default-days: 14
     open-pull-requests-limit: 5
+    # Patch bumps only for the datastores: a new major (Postgres 18) needs a data
+    # migration, a new minor line (ClickHouse 26.10, Valkey 9.x) is a deliberate
+    # change. Langfuse itself ships features in minors, so only its majors wait.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "valkey/valkey"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "clickhouse/clickhouse-server"
+        update-types: ["version-update:semver-minor"]
     commit-message:
       prefix: chore(deps)
 

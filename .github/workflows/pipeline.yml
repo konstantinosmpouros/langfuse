@@ -1,0 +1,278 @@
+name: CI/CD
+
+# CI/CD for self-hosted Langfuse on Dennis. Four jobs:
+#   validate  every push and PR: compose config (both files, dummy secrets),
+#             yamllint, ci/check_config.py (pinning, limits, secrets-as-files,
+#             network isolation, local/Dennis lockstep), LF, shellcheck, and
+#             every pinned image exists for linux/arm64. Builds nothing.
+#   trivy     every push and PR: scan every pinned image (ARM64, as Dennis
+#             pulls it); a fixable CRITICAL CVE fails the run and blocks deploy.
+#   smoke     every push and PR: boot the local stack, send a trace with the
+#             Langfuse Python SDK through the app-side mask hook, read it back.
+#   deploy    push to main that changed a deployed file, or Run workflow on
+#             main; owner only: SSH to Dennis with a forced-command key that
+#             can only run /opt/deploy/langfuse.sh <sha> (deploy/dennis-deploy.sh)
+#             → checkout → compose pull + up -d → wait healthy → one-shots.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      deploy: ${{ steps.changes.outputs.deploy }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0 # full history for the deploy diff below
+          persist-credentials: false
+
+      # Real secrets are gitignored / live on Dennis; compose only needs files.
+      - name: Dummy secrets
+        run: bash scripts/gen-secrets.sh ./secrets ci@example.com
+
+      - name: Compose config (local)
+        run: docker compose -f docker-compose.yaml config -q
+
+      - name: Compose config (Dennis)
+        run: docker compose -f docker-compose-denis.yaml config -q
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install checkers
+        run: pip install "yamllint==1.35.1" "PyYAML==6.0.2"
+
+      - name: yamllint
+        run: yamllint --strict .
+
+      - name: Compose policy checks
+        run: python ci/check_config.py
+
+      - name: LF line endings
+        run: |
+          if git ls-files -z | xargs -0 grep -lI $'\r' ; then
+            echo "CRLF line endings in the files above"; exit 1
+          fi
+
+      # shellcheck is preinstalled on GitHub's Ubuntu runners.
+      - name: shellcheck
+        run: shellcheck deploy/dennis-deploy.sh scripts/*.sh
+
+      # Dennis is ARM64: every pinned ref must exist and ship linux/arm64.
+      - name: Pinned images exist for ARM64
+        run: |
+          refs=$(grep -hE '^[[:space:]]+image:[[:space:]]' docker-compose-denis.yaml | awk '{print $2}' | sort -u)
+          [ -n "$refs" ] || { echo "::error::no image found (parse error?)"; exit 1; }
+          failed=0
+          for ref in $refs; do
+            if docker buildx imagetools inspect "$ref" | grep -qE 'Platform:[[:space:]]+linux/arm64$'; then
+              echo "$ref: linux/arm64 ok"
+            else
+              echo "::error::$ref is missing or has no linux/arm64 image"; failed=1
+            fi
+          done
+          exit "$failed"
+
+      # Deploy when a deployed file changed on main (git diff of the push
+      # range), or on Run workflow from main. Same step as mcp_gateway/sandbox.
+      - name: Deploy? (a deployed file changed on main)
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          DEPLOY_PATHS: docker-compose-denis.yaml config scripts
+        run: |
+          read -ra paths <<<"$DEPLOY_PATHS"
+          deploy=false
+          if [ "$REF" = refs/heads/main ]; then
+            if [ "$EVENT" = workflow_dispatch ]; then
+              deploy=true
+            elif [ "$EVENT" = push ]; then
+              if [ -z "$PUSH_BEFORE" ] || ! git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+                deploy=true # no usable base: can't tell, so don't skip a deploy
+              elif ! git diff --quiet "$PUSH_BEFORE" "$GITHUB_SHA" -- "${paths[@]}"; then
+                deploy=true
+              fi
+            fi
+          fi
+          echo "deploy=$deploy" | tee -a "$GITHUB_OUTPUT"
+
+  # Every image Dennis runs, scanned straight from the registry as ARM64.
+  # Same gate as monitoring: fixable CRITICAL CVEs fail.
+  trivy:
+    name: trivy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+
+      - name: Trivy scan pinned images
+        run: |
+          refs=$(grep -hE '^[[:space:]]+image:[[:space:]]' docker-compose-denis.yaml | awk '{print $2}' | sort -u)
+          [ -n "$refs" ] || { echo "::error::no image found (parse error?)"; exit 1; }
+          failed=0
+          for ref in $refs; do
+            echo "::group::$ref"
+            docker run --rm -v trivy-cache:/root/.cache \
+              -v "$PWD/.trivyignore.yaml:/work/.trivyignore.yaml:ro" "$TRIVY_IMAGE" \
+              image --image-src remote --platform linux/arm64 \
+              --ignorefile /work/.trivyignore.yaml \
+              --scanners vuln --severity CRITICAL --ignore-unfixed \
+              --exit-code 1 --no-progress "$ref" || failed=1
+            echo "::endgroup::"
+          done
+          exit "$failed"
+
+  # The real stack (amd64 runner, same pinned images), end to end.
+  smoke:
+    name: smoke
+    needs: [validate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+
+      - name: Throwaway secrets
+        run: bash scripts/gen-secrets.sh ./secrets ci@example.com
+
+      - name: Boot the stack
+        run: docker compose up -d --wait --wait-timeout 600 langfuse-web langfuse-worker
+
+      - name: One-shots ran
+        run: |
+          docker compose up --no-deps retention-init
+          for c in langfuse-minio-init langfuse-retention-init; do
+            code=$(docker inspect -f '{{.State.ExitCode}}' "$c")
+            docker logs "$c" | tail -3
+            [ "$code" = 0 ] || { echo "::error::$c exited $code"; exit 1; }
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Send and read back a masked trace
+        run: |
+          pip install "langfuse==4.18.0"
+          python ci/smoke_trace.py
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 80
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # CD — deploys this commit to Dennis over SSH; builds nothing. The key in
+  # DENNIS_SSH_KEY is pinned on Dennis to a forced command, so all it can do is
+  # run /opt/deploy/langfuse.sh with this sha (deploy/dennis-deploy.sh).
+  # Same job as mcp_gateway/sandbox; runbook: CLAUDE.md § CD to Dennis.
+  deploy:
+    name: deploy
+    needs: [validate, trivy, smoke]
+    if: >-
+      needs.validate.outputs.deploy == 'true'
+      && github.repository == 'konstantinosmpouros/langfuse'
+      && github.actor == github.repository_owner
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    concurrency:
+      group: deploy-dennis
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # OIDC token → Tailscale workload identity
+    steps:
+      - name: Only the repository owner can deploy
+        env:
+          ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if [ "$ACTOR" != "$OWNER" ]; then
+            echo "::error::Deploys are started by $OWNER only (this run was started by $ACTOR)."
+            exit 1
+          fi
+
+      - name: Write the SSH key and the pinned host key
+        env:
+          SSH_HOST: ${{ secrets.DENNIS_SSH_HOST }}
+          SSH_USER: ${{ secrets.DENNIS_SSH_USER }}
+          SSH_KEY: ${{ secrets.DENNIS_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.DENNIS_SSH_KNOWN_HOSTS }}
+          TS_CLIENT: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_AUDIENCE: ${{ secrets.TS_AUDIENCE }}
+        run: |
+          missing=""
+          [ -n "$SSH_HOST" ] || missing="$missing DENNIS_SSH_HOST"
+          [ -n "$SSH_USER" ] || missing="$missing DENNIS_SSH_USER"
+          [ -n "$SSH_KEY" ] || missing="$missing DENNIS_SSH_KEY"
+          [ -n "$SSH_KNOWN_HOSTS" ] || missing="$missing DENNIS_SSH_KNOWN_HOSTS"
+          [ -n "$TS_CLIENT" ] || missing="$missing TS_OAUTH_CLIENT_ID"
+          [ -n "$TS_AUDIENCE" ] || missing="$missing TS_AUDIENCE"
+          if [ -n "$missing" ]; then
+            echo "::error::Secret(s) not set in the production environment:$missing"
+            exit 1
+          fi
+          umask 077
+          dir="$RUNNER_TEMP/dennis-ssh"
+          mkdir -p "$dir"
+          printf '%s\n' "$SSH_KEY" > "$dir/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$dir/known_hosts"
+
+      # Ephemeral tailnet node tagged tag:ci via GitHub OIDC (no Tailscale
+      # secret stored); the tailnet policy lets tag:ci reach only tag:dennis:22.
+      - name: Join the tailnet (ephemeral, tag:ci)
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+          ping: ${{ secrets.DENNIS_SSH_HOST }}
+
+      - name: Deploy over SSH
+        env:
+          SSH_HOST: ${{ secrets.DENNIS_SSH_HOST }}
+          SSH_USER: ${{ secrets.DENNIS_SSH_USER }}
+        run: |
+          dir="$RUNNER_TEMP/dennis-ssh"
+          ssh -T \
+            -i "$dir/id_ed25519" \
+            -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile="$dir/known_hosts" \
+            -o GlobalKnownHostsFile=/dev/null \
+            -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes \
+            -o ConnectTimeout=30 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 \
+            "$SSH_USER@$SSH_HOST" "$GITHUB_SHA"
+
+      - name: Remove the SSH key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/dennis-ssh"

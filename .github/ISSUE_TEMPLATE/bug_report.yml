@@ -1,0 +1,31 @@
+name: Bug report
+description: Something in this deployment config does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Security issues: do NOT open an issue — see SECURITY.md.
+        Never paste secrets, API keys, trace content or logs that contain them.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you got.
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options:
+        - Local (docker-compose.yaml)
+        - Dennis (docker-compose-denis.yaml)
+        - CI
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output (redacted)
+      render: text

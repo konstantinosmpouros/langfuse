@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<!--
+  Server overrides for Langfuse's ClickHouse on a shared VM (mounted as
+  /etc/clickhouse-server/config.d/zz-langfuse.xml). Goals: small memory
+  footprint, JSON logs on stdout only, and no system tables that would copy
+  trace content to disk outside the 30-day TTL.
+-->
+<clickhouse>
+    <!--
+      JSON on stdout (Docker log driver → Alloy/Loki). The image also logs to
+      files in the container layer (they can't be removed here): capped at 2×10 MB.
+    -->
+    <logger>
+        <level>warning</level>
+        <console>1</console>
+        <size>10M</size>
+        <count>2</count>
+        <formatting>
+            <type>json</type>
+        </formatting>
+    </logger>
+
+    <!-- Memory: the server caps itself below the container limit (cgroup-aware). -->
+    <max_server_memory_usage_to_ram_ratio>0.75</max_server_memory_usage_to_ram_ratio>
+    <mark_cache_size>134217728</mark_cache_size>
+    <index_mark_cache_size>33554432</index_mark_cache_size>
+    <uncompressed_cache_size>16777216</uncompressed_cache_size>
+    <index_uncompressed_cache_size>16777216</index_uncompressed_cache_size>
+    <primary_index_cache_size>33554432</primary_index_cache_size>
+    <concurrent_threads_soft_limit_num>4</concurrent_threads_soft_limit_num>
+    <background_schedule_pool_size>16</background_schedule_pool_size>
+    <background_common_pool_size>4</background_common_pool_size>
+
+    <!-- Single node: no replication, so no interserver port. -->
+    <interserver_http_port remove="remove"/>
+
+    <!--
+      System log tables: off, except query_log. Langfuse v4 reads
+      system.query_log to track long-running queries; it keeps 3 days. Langfuse
+      passes values as query parameters, so the logged text holds placeholders,
+      not trace content. text_log etc. would cost memory and disk for no use.
+    -->
+    <query_log replace="replace">
+        <database>system</database>
+        <table>query_log</table>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </query_log>
+    <query_thread_log remove="remove"/>
+    <query_views_log remove="remove"/>
+    <query_metric_log remove="remove"/>
+    <text_log remove="remove"/>
+    <trace_log remove="remove"/>
+    <metric_log remove="remove"/>
+    <asynchronous_metric_log remove="remove"/>
+    <part_log remove="remove"/>
+    <processors_profile_log remove="remove"/>
+    <opentelemetry_span_log remove="remove"/>
+    <session_log remove="remove"/>
+    <latency_log remove="remove"/>
+    <error_log remove="remove"/>
+    <blob_storage_log remove="remove"/>
+    <backup_log remove="remove"/>
+    <s3queue_log remove="remove"/>
+    <crash_log remove="remove"/>
+</clickhouse>

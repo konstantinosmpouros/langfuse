@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!--
+  Query-level limits for every ClickHouse user (mounted as
+  /etc/clickhouse-server/users.d/zz-langfuse.xml). The `langfuse` user itself is
+  created by the image entrypoint from CLICKHOUSE_USER + CLICKHOUSE_PASSWORD_FILE.
+-->
+<clickhouse>
+    <profiles>
+        <default>
+            <max_threads>2</max_threads>
+            <!-- Per query; the server-wide cap is in config.xml. -->
+            <max_memory_usage>734003200</max_memory_usage>
+            <!-- Spill big GROUP BY / ORDER BY to disk instead of failing. -->
+            <max_bytes_before_external_group_by>268435456</max_bytes_before_external_group_by>
+            <max_bytes_before_external_sort>268435456</max_bytes_before_external_sort>
+        </default>
+    </profiles>
+</clickhouse>

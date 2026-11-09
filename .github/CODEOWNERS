@@ -1,0 +1,6 @@
+# Every change is reviewed by the owner; deploy-relevant paths called out.
+*                          @konstantinosmpouros
+/docker-compose-denis.yaml @konstantinosmpouros
+/deploy/                   @konstantinosmpouros
+/scripts/                  @konstantinosmpouros
+/.github/                  @konstantinosmpouros

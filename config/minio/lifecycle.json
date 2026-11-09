@@ -1,0 +1,14 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-after-30-days",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": ""
+      },
+      "Expiration": {
+        "Days": 30
+      }
+    }
+  ]
+}

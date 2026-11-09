@@ -1,0 +1,438 @@
+# Dennis Langfuse v4 (self-hosted): web + worker + Postgres + ClickHouse +
+# Valkey + MinIO. Plain Compose, not a Swarm stack (CLAUDE.md § Why plain
+# Compose). Fixed project name, so it doesn't follow the folder. Deployed by CD
+# from the repo clone in /opt/langfuse/repo (deploy/dennis-deploy.sh); configs
+# are bind-mounted from that clone, secrets from /opt/langfuse/secrets (root
+# dir 0711, files 0400/0440 owned by the uid that reads them).
+#
+# No host ports. The UI is https://langfuse.magenticx.com via the shared NPM
+# over the `proxy` overlay; apps reach the ingestion API at
+# http://langfuse-web:3000 over the `langfuse` overlay. Runbook: CLAUDE.md.
+name: langfuse
+
+# ---- Shared blocks ----------------------------------------------------------
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+# Containers that start as root and drop to their own user (postgres,
+# clickhouse, valkey): only the capabilities the entrypoints need to chown the
+# data dir, read the root-unreadable secret files and switch user.
+x-root-start: &root-start
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FOWNER
+    - SETGID
+    - SETUID
+
+# Containers that run as a non-root user from the start: no capabilities.
+x-non-root: &non-root
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+# Environment of BOTH langfuse-web and langfuse-worker. Secrets are *_FILE
+# paths; scripts/secrets-env.sh turns them into the variables Langfuse reads.
+x-langfuse-env: &langfuse-env
+  NEXTAUTH_URL: https://langfuse.magenticx.com
+  DATABASE_HOST: postgres:5432
+  DATABASE_NAME: langfuse
+  DATABASE_USERNAME: langfuse
+  DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+  SALT_FILE: /run/secrets/salt
+  ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
+  TELEMETRY_ENABLED: "false"
+  LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+  # v4 in-app AI agent: off (it would send trace content to an LLM provider).
+  LANGFUSE_IN_APP_AGENT_ENABLED: "false"
+  LANGFUSE_LOG_FORMAT: json
+  LANGFUSE_LOG_LEVEL: info
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_USER: langfuse
+  CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  # Raw ingestion events (full content) → MinIO bucket `langfuse`, prefix
+  # events/, as the least-privileged user `langfuse`; expire after 30 days.
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY_FILE: /run/secrets/s3_secret_key
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  # Media uploads and batch exports are off: both need MinIO reachable from
+  # outside this project (presigned URLs), which it deliberately is not.
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+  REDIS_HOST: valkey
+  REDIS_PORT: "6379"
+  REDIS_AUTH_FILE: /run/secrets/redis_password
+  REDIS_TLS_ENABLED: "false"
+
+x-langfuse-secrets: &langfuse-secrets
+  - postgres_password
+  - clickhouse_password
+  - redis_password
+  - s3_secret_key
+  - salt
+  - encryption_key
+
+x-langfuse-depends-on: &langfuse-depends-on
+  postgres:
+    condition: service_healthy
+  clickhouse:
+    condition: service_healthy
+  valkey:
+    condition: service_healthy
+  minio-init:
+    condition: service_completed_successfully
+
+services:
+
+  langfuse-web: # 3000
+    # UI + public API (ingestion). Runs the Postgres and ClickHouse migrations
+    # on start. The only service on the shared `langfuse` network.
+    container_name: langfuse-web
+    image: langfuse/langfuse:4.70.0@sha256:932a46dfab770f89ecb2ec35258b6b80d3be8773403981a64d271ff0a408deef
+    entrypoint: ["dumb-init", "--", "/bin/sh", "/opt/langfuse/secrets-env.sh", "./web/entrypoint.sh"]
+    command: ["node", "./web/server.js", "--keepAliveTimeout", "110000"]
+    environment:
+      <<: *langfuse-env
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+      NODE_OPTIONS: --max-old-space-size=1024
+      NEXTAUTH_SECRET_FILE: /run/secrets/nextauth_secret
+      AUTH_DISABLE_SIGNUP: "true"
+      NEXT_PUBLIC_SIGN_UP_DISABLED: "true"
+      AUTH_SESSION_MAX_AGE: "720" # minutes
+      LANGFUSE_CSP_ENFORCE_HTTPS: "true"
+      # Headless init: org `denis` + project `magenticx` with its API keys + the
+      # owner user. Create-if-missing on every start. `orthodoxai` is created
+      # once in the UI (CLAUDE.md § One-time setup).
+      LANGFUSE_INIT_ORG_ID: denis
+      LANGFUSE_INIT_ORG_NAME: Dennis
+      LANGFUSE_INIT_PROJECT_ID: magenticx
+      LANGFUSE_INIT_PROJECT_NAME: magenticx
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY_FILE: /run/secrets/init_project_public_key
+      LANGFUSE_INIT_PROJECT_SECRET_KEY_FILE: /run/secrets/init_project_secret_key
+      LANGFUSE_INIT_USER_NAME: admin
+      LANGFUSE_INIT_USER_EMAIL_FILE: /run/secrets/init_user_email
+      LANGFUSE_INIT_USER_PASSWORD_FILE: /run/secrets/init_user_password
+    secrets:
+      - postgres_password
+      - clickhouse_password
+      - redis_password
+      - s3_secret_key
+      - salt
+      - encryption_key
+      - nextauth_secret
+      - init_user_email
+      - init_user_password
+      - init_project_public_key
+      - init_project_secret_key
+    volumes:
+      - /opt/langfuse/repo/scripts/secrets-env.sh:/opt/langfuse/secrets-env.sh:ro
+    depends_on: *langfuse-depends-on
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/public/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 180s
+      retries: 4
+    <<: *non-root
+    mem_limit: 1536m
+    cpus: 1.0
+    pids_limit: 256
+    logging: *logging
+    restart: unless-stopped
+    # No ports: NPM reaches it over `proxy`, the apps over `langfuse`.
+    networks:
+      - internal
+      - langfuse
+      - proxy
+
+  langfuse-worker: # 3030
+    # Async ingestion: S3 event → ClickHouse. No network but `internal`.
+    container_name: langfuse-worker
+    image: langfuse/langfuse-worker:4.70.0@sha256:3b3b204fa72fd02d010ab90c667d07281e4b9ec3b5b0b1d21470ac2624b8a564
+    entrypoint: ["dumb-init", "--", "/bin/sh", "/opt/langfuse/secrets-env.sh", "./worker/entrypoint.sh"]
+    command: ["node", "worker/dist/index.js"]
+    environment:
+      <<: *langfuse-env
+      HOSTNAME: 0.0.0.0
+      NODE_OPTIONS: --max-old-space-size=448
+    secrets: *langfuse-secrets
+    volumes:
+      - /opt/langfuse/repo/scripts/secrets-env.sh:/opt/langfuse/secrets-env.sh:ro
+    depends_on:
+      <<: *langfuse-depends-on
+      # web runs the migrations; the worker starts on a migrated schema.
+      langfuse-web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3030/api/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 4
+    <<: *non-root
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 256
+    logging: *logging
+    restart: unless-stopped
+    networks:
+      - internal
+
+  postgres: # 5432
+    container_name: langfuse-postgres
+    image: postgres:17.10-alpine3.24@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=60
+      - -c
+      - log_min_messages=warning
+      - -c
+      - log_statement=none
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_DB: langfuse
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    <<: *root-start
+    shm_size: 128m
+    mem_limit: 256m
+    cpus: 1.0
+    pids_limit: 256
+    logging: *logging
+    restart: unless-stopped
+    networks:
+      - internal
+
+  clickhouse: # 8123 http, 9000 native
+    container_name: langfuse-clickhouse
+    image: clickhouse/clickhouse-server:26.3.60.2-alpine@sha256:4522d78c784f287988a51b3e4f96792b1833c7575ce1f3192d3d96c0ad0292f5
+    environment:
+      # No CLICKHOUSE_DB: `default` exists anyway, and setting it makes the
+      # entrypoint run a temporary init server it then can't kill without
+      # CAP_KILL (first boot failed once and restarted).
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "0"
+    secrets:
+      - clickhouse_password
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - /opt/langfuse/repo/config/clickhouse/config.xml:/etc/clickhouse-server/config.d/zz-langfuse.xml:ro
+      - /opt/langfuse/repo/config/clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-langfuse.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    <<: *root-start
+    mem_limit: 1024m
+    cpus: 1.5
+    pids_limit: 512
+    logging: *logging
+    restart: unless-stopped
+    networks:
+      - internal
+
+  valkey: # 6379
+    # BullMQ queues. noeviction is required: an evicted job is a lost trace.
+    container_name: langfuse-valkey
+    image: valkey/valkey:8.1.10-alpine3.24@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507
+    command:
+      - valkey-server
+      - --aclfile
+      - /run/secrets/valkey_acl
+      - --maxmemory
+      - 96mb
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - "yes"
+      - --save
+      - ""
+      - --loglevel
+      - warning
+    secrets:
+      - valkey_acl
+      - redis_password
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" valkey-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    <<: *root-start
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 128
+    logging: *logging
+    restart: unless-stopped
+    networks:
+      - internal
+
+  minio: # 9000 (S3 API; console off)
+    # Chainguard's MinIO build (MinIO stopped publishing community images in
+    # 2025); only `latest` exists, so it is pinned by digest. MinIO inside:
+    # RELEASE.2026-10-23T20-06-51Z.
+    container_name: langfuse-minio
+    image: cgr.dev/chainguard/minio@sha256:a1ac4589a5f8136b616e667b48a0bea9719bb10bd45799ea946f24bbedfafde4
+    command: ["server", "--json", "--address", ":9000", "/data"]
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_root_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
+      MINIO_BROWSER: "off"
+    secrets:
+      - minio_root_user
+      - minio_root_password
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    <<: *non-root
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 256
+    logging: *logging
+    restart: unless-stopped
+    networks:
+      - internal
+
+  minio-init:
+    # One-shot: bucket, 30-day lifecycle, least-privileged `langfuse` user.
+    container_name: langfuse-minio-init
+    image: cgr.dev/chainguard/minio@sha256:a1ac4589a5f8136b616e667b48a0bea9719bb10bd45799ea946f24bbedfafde4
+    entrypoint: ["/bin/sh", "/opt/langfuse/minio-init.sh"]
+    secrets:
+      - minio_root_user
+      - minio_root_password
+      - s3_secret_key
+    volumes:
+      - /opt/langfuse/repo/scripts/minio-init.sh:/opt/langfuse/minio-init.sh:ro
+      - /opt/langfuse/repo/config/minio:/etc/langfuse/minio:ro
+    tmpfs:
+      - /tmp
+    depends_on:
+      minio:
+        condition: service_healthy
+    <<: *non-root
+    mem_limit: 128m
+    pids_limit: 64
+    logging: *logging
+    restart: "no"
+    networks:
+      - internal
+
+  retention-init:
+    # One-shot: 30-day TTL on the ClickHouse trace tables, after web's migrations.
+    container_name: langfuse-retention-init
+    image: clickhouse/clickhouse-server:26.3.60.2-alpine@sha256:4522d78c784f287988a51b3e4f96792b1833c7575ce1f3192d3d96c0ad0292f5
+    entrypoint: ["/bin/sh", "/opt/langfuse/clickhouse-retention.sh"]
+    user: "1001:65533"
+    environment:
+      RETENTION_DAYS: "30"
+    secrets:
+      - clickhouse_password
+    volumes:
+      - /opt/langfuse/repo/scripts/clickhouse-retention.sh:/opt/langfuse/clickhouse-retention.sh:ro
+    depends_on:
+      langfuse-web:
+        condition: service_healthy
+    <<: *non-root
+    mem_limit: 256m
+    pids_limit: 64
+    logging: *logging
+    restart: "no"
+    networks:
+      - internal
+
+
+volumes:
+  postgres-data:
+  clickhouse-data:
+  valkey-data:
+  minio-data:
+
+
+networks:
+  # Datastores, worker and web. No route out (internal).
+  internal:
+    internal: true
+  # Attachable overlay, created once by hand (CLAUDE.md § One-time setup);
+  # the magenticx and orthodoxai Swarm stacks join it as external to reach
+  # http://langfuse-web:3000. Only langfuse-web is on it.
+  langfuse:
+    external: true
+    name: langfuse
+  # The shared NPM network (Swarm overlay, attachable): NPM → langfuse-web:3000.
+  proxy:
+    external: true
+    name: proxy
+
+
+secrets:
+  postgres_password:
+    file: /opt/langfuse/secrets/postgres_password
+  clickhouse_password:
+    file: /opt/langfuse/secrets/clickhouse_password
+  redis_password:
+    file: /opt/langfuse/secrets/redis_password
+  valkey_acl:
+    file: /opt/langfuse/secrets/valkey_users.acl
+  minio_root_user:
+    file: /opt/langfuse/secrets/minio_root_user
+  minio_root_password:
+    file: /opt/langfuse/secrets/minio_root_password
+  s3_secret_key:
+    file: /opt/langfuse/secrets/s3_secret_key
+  salt:
+    file: /opt/langfuse/secrets/salt
+  encryption_key:
+    file: /opt/langfuse/secrets/encryption_key
+  nextauth_secret:
+    file: /opt/langfuse/secrets/nextauth_secret
+  init_user_email:
+    file: /opt/langfuse/secrets/init_user_email
+  init_user_password:
+    file: /opt/langfuse/secrets/init_user_password
+  init_project_public_key:
+    file: /opt/langfuse/secrets/init_project_public_key
+  init_project_secret_key:
+    file: /opt/langfuse/secrets/init_project_secret_key

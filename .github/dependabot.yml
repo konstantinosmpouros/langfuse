@@ -1,0 +1,23 @@
+# Update PRs for the pinned images and actions. The 14-day cooldown enforces
+# the project rule "pin only releases at least two weeks old". Every PR runs
+# the full CI (policy checks, Trivy, smoke trace) before a human merges it.
+version: 2
+updates:
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    commit-message:
+      prefix: ci(deps)

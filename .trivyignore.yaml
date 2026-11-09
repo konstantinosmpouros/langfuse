@@ -1,0 +1,13 @@
+# Accepted findings for the CI Trivy gate (fixable CRITICAL CVEs fail the run).
+# Every entry is scoped to one path, says why it is not exploitable here, and
+# expires — after that date the gate fails again and the entry is re-reviewed.
+vulnerabilities:
+  - id: CVE-2025-68121
+    paths:
+      - usr/local/bin/gosu
+    statement: >-
+      Go stdlib CVE in the official postgres image's gosu binary (present in
+      every current postgres:17 tag). gosu only drops root to the postgres user
+      once at container start; it does no networking or TLS. Re-check when the
+      postgres image ships a gosu built with Go >= 1.24.13.
+    expired_at: 2027-02-01

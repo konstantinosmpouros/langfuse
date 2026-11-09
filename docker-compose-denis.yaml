@@ -233,7 +233,7 @@ services:
 
   clickhouse: # 8123 http, 9000 native
     container_name: langfuse-clickhouse
-    image: clickhouse/clickhouse-server:26.3.60.2-alpine@sha256:4522d78c784f287988a51b3e4f96792b1833c7575ce1f3192d3d96c0ad0292f5
+    image: clickhouse/clickhouse-server:26.10.3.7-alpine@sha256:1b09f476eb1109522cfc0e8e4ddf6a4305263e7cdd310f7bd1d3fd29dfcb8b33
     environment:
       # No CLICKHOUSE_DB: `default` exists anyway, and setting it makes the
       # entrypoint run a temporary init server it then can't kill without
@@ -363,7 +363,7 @@ services:
   retention-init:
     # One-shot: 30-day TTL on the ClickHouse trace tables, after web's migrations.
     container_name: langfuse-retention-init
-    image: clickhouse/clickhouse-server:26.3.60.2-alpine@sha256:4522d78c784f287988a51b3e4f96792b1833c7575ce1f3192d3d96c0ad0292f5
+    image: clickhouse/clickhouse-server:26.10.3.7-alpine@sha256:1b09f476eb1109522cfc0e8e4ddf6a4305263e7cdd310f7bd1d3fd29dfcb8b33
     entrypoint: ["/bin/sh", "/opt/langfuse/clickhouse-retention.sh"]
     user: "1001:65533"
     environment:

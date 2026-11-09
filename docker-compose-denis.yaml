@@ -353,7 +353,7 @@ services:
       minio:
         condition: service_healthy
     <<: *non-root
-    mem_limit: 128m
+    mem_limit: 256m # mc on ARM64 (Dennis) needs > 128m: `admin policy attach` was OOM-killed
     pids_limit: 64
     logging: *logging
     restart: "no"
@@ -376,7 +376,7 @@ services:
       langfuse-web:
         condition: service_healthy
     <<: *non-root
-    mem_limit: 256m
+    mem_limit: 512m # clickhouse-client headroom on ARM64; one-shots are outside the memory budget
     pids_limit: 64
     logging: *logging
     restart: "no"

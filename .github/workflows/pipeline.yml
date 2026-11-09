@@ -156,8 +156,12 @@ jobs:
         with:
           persist-credentials: false
 
+      # Exactly as on Dennis (--dennis: per-uid owners, 0400/0440, dir 0711), so
+      # the smoke boots under production's permission model. Without it the
+      # files are the runner's 0600 and Valkey (999) / MinIO (65532) can't read
+      # theirs; Docker Desktop hides that locally.
       - name: Throwaway secrets
-        run: bash scripts/gen-secrets.sh ./secrets ci@example.com
+        run: sudo bash scripts/gen-secrets.sh --dennis ./secrets ci@example.com
 
       - name: Boot the stack
         run: docker compose up -d --wait --wait-timeout 600 langfuse-web langfuse-worker

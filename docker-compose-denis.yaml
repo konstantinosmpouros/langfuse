@@ -195,7 +195,7 @@ services:
 
   postgres: # 5432
     container_name: langfuse-postgres
-    image: postgres:17.10-alpine3.24@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    image: postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
     command:
       - postgres
       - -c

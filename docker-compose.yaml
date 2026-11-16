@@ -307,7 +307,7 @@ services:
     # 2025); only `latest` exists, so it is pinned by digest. MinIO inside:
     # RELEASE.2026-10-23T20-06-51Z.
     container_name: langfuse-minio
-    image: cgr.dev/chainguard/minio@sha256:a1ac4589a5f8136b616e667b48a0bea9719bb10bd45799ea946f24bbedfafde4
+    image: cgr.dev/chainguard/minio@sha256:9158c67aa441627c366442e84656f689e16bec4809851ec64318561a365b69e4
     command: ["server", "--json", "--address", ":9000", "/data"]
     environment:
       MINIO_ROOT_USER_FILE: /run/secrets/minio_root_user
@@ -336,7 +336,7 @@ services:
   minio-init:
     # One-shot: bucket, 30-day lifecycle, least-privileged `langfuse` user.
     container_name: langfuse-minio-init
-    image: cgr.dev/chainguard/minio@sha256:a1ac4589a5f8136b616e667b48a0bea9719bb10bd45799ea946f24bbedfafde4
+    image: cgr.dev/chainguard/minio@sha256:9158c67aa441627c366442e84656f689e16bec4809851ec64318561a365b69e4
     entrypoint: ["/bin/sh", "/opt/langfuse/minio-init.sh"]
     secrets:
       - minio_root_user
